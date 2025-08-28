@@ -3,7 +3,10 @@ mod hsr;
 mod zzz;
 
 use std::{
-    collections::HashMap, path::{Path, PathBuf}, sync::mpsc, thread
+    collections::HashMap,
+    path::{Path, PathBuf},
+    sync::mpsc,
+    thread,
 };
 
 use crate::app::{Message, State};
@@ -69,7 +72,12 @@ impl Game {
         });
     }
 
-    pub fn inventory(self, message_tx: &mpsc::Sender<Message>, no_artifact_filter: bool, without_character: bool) {
+    pub fn inventory(
+        self,
+        message_tx: &mpsc::Sender<Message>,
+        no_artifact_filter: bool,
+        without_character: bool,
+    ) {
         let message_tx = message_tx.clone();
 
         thread::spawn(move || {
@@ -129,6 +137,16 @@ impl Game {
                 }
             };
 
+            let skill_type_map = match build_skill_type_map() {
+                Ok(skill_type_map) => skill_type_map,
+                Err(e) => {
+                    message_tx
+                        .send(Message::GoTo(State::Error(e.to_string())))
+                        .unwrap();
+                    return;
+                }
+            };
+
             let devices = match self.devices() {
                 Ok(devices) => devices,
                 Err(e) => {
@@ -154,9 +172,10 @@ impl Game {
                     &weapon_id_map,
                     &material_id_map,
                     &character_id_map,
+                    &skill_type_map,
                     &device_rx,
                     no_artifact_filter,
-                    without_character
+                    without_character,
                 ),
                 _ => unimplemented!(),
             };
@@ -164,7 +183,7 @@ impl Game {
                 Ok(inventory) => {
                     message_tx
                         .send(Message::GoTo(State::Inventory(inventory)))
-                    .unwrap();
+                        .unwrap();
                 }
 
                 Err(e) => {
@@ -369,7 +388,8 @@ fn map_equip_type_to_good(input: &str) -> String {
         "EQUIP_RING" => "goblet",
         "EQUIP_DRESS" => "circlet",
         _ => input,
-    }.to_owned()
+    }
+    .to_owned()
 }
 
 fn map_name_to_good(input: &str) -> String {
@@ -467,19 +487,19 @@ fn map_main_prop_to_good(input: &str) -> String {
         "FIGHT_PROP_ICE_ADD_HURT" => "cryo_dmg_",
         "FIGHT_PROP_GRASS_ADD_HURT" => "dendro_dmg_",
         _ => input,
-    }.to_owned()
+    }
+    .to_owned()
 }
 
 pub fn build_main_prop_map() -> anyhow::Result<HashMap<u32, String>> {
     let reliquary_main_prop_excel_config: Vec<ReliquaryMainPropExcelConfigDataEntry> =
-        serde_json::from_str(include_str!("../../data/ReliquaryMainPropExcelConfigData.json"))?;
+        serde_json::from_str(include_str!(
+            "../../data/ReliquaryMainPropExcelConfigData.json"
+        ))?;
 
     let mut result = HashMap::new();
     for entry in reliquary_main_prop_excel_config {
-        result.insert(
-            entry.id,
-            map_main_prop_to_good(&entry.propType),
-        );
+        result.insert(entry.id, map_main_prop_to_good(&entry.propType));
     }
 
     for (id, data) in &result {
@@ -494,7 +514,7 @@ pub fn build_main_prop_map() -> anyhow::Result<HashMap<u32, String>> {
 struct ReliquaryAffixExcelConfigDataEntry {
     id: u32,
     propType: String,
-    propValue: f64
+    propValue: f64,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -506,17 +526,23 @@ pub struct Substat {
 
 pub fn build_affix_prop_map() -> anyhow::Result<HashMap<u32, Substat>> {
     let reliquary_affix_excel_config: Vec<ReliquaryAffixExcelConfigDataEntry> =
-        serde_json::from_str(include_str!("../../data/ReliquaryAffixExcelConfigData.json"))?;
+        serde_json::from_str(include_str!(
+            "../../data/ReliquaryAffixExcelConfigData.json"
+        ))?;
 
     let mut result = HashMap::new();
     for entry in reliquary_affix_excel_config {
         let key = map_main_prop_to_good(&entry.propType);
         result.insert(
             entry.id,
-            Substat{
-                value: if key.ends_with("_") { entry.propValue * 100. } else { entry.propValue },
+            Substat {
+                value: if key.ends_with("_") {
+                    entry.propValue * 100.
+                } else {
+                    entry.propValue
+                },
                 key: key,
-            }
+            },
         );
     }
 
@@ -539,9 +565,8 @@ struct WeaponExcelConfigDataEntry {
 #[allow(non_snake_case)]
 pub struct WeaponData {
     pub name: String,
-    pub rarity: u32
+    pub rarity: u32,
 }
-
 
 pub fn build_weapon_id_map() -> anyhow::Result<HashMap<u32, WeaponData>> {
     let weapon_excel_config: Vec<WeaponExcelConfigDataEntry> =
@@ -555,8 +580,8 @@ pub fn build_weapon_id_map() -> anyhow::Result<HashMap<u32, WeaponData>> {
                 entry.id,
                 WeaponData {
                     name: map_name_to_good(text),
-                    rarity: entry.rankLevel
-                }
+                    rarity: entry.rankLevel,
+                },
             );
         }
     }
@@ -583,10 +608,7 @@ pub fn build_material_id_map() -> anyhow::Result<HashMap<u32, String>> {
     for entry in material_excel_config {
         let hash_str = entry.nameTextMapHash.to_string();
         if let Some(text) = TEXT_MAP_EN.get(&hash_str) {
-            result.insert(
-                entry.id,
-                map_name_to_good(text)
-            );
+            result.insert(entry.id, map_name_to_good(text));
         }
     }
 
@@ -612,10 +634,7 @@ pub fn build_character_id_map() -> anyhow::Result<HashMap<u32, String>> {
     for entry in avatar_excel_config {
         let hash_str = entry.nameTextMapHash.to_string();
         if let Some(text) = TEXT_MAP_EN.get(&hash_str) {
-            result.insert(
-                entry.id,
-                map_name_to_good(text)
-            );
+            result.insert(entry.id, map_name_to_good(text));
         }
     }
 
@@ -626,6 +645,36 @@ pub fn build_character_id_map() -> anyhow::Result<HashMap<u32, String>> {
     Ok(result)
 }
 
-pub use gi::Inventory;
+#[derive(serde::Deserialize)]
+#[allow(non_snake_case)]
+pub struct AvatarSkillDepotExcelConfigDataEntry {
+    pub energySkill: u32,
+    pub skills: Vec<u32>,
+}
+
+#[derive(Copy, Clone, Debug)]
+enum SkillType {
+    Auto,
+    Skill,
+    Burst,
+}
+
+pub fn build_skill_type_map() -> anyhow::Result<HashMap<u32, SkillType>> {
+    let avatar_skill_depot_excel_config_data: Vec<AvatarSkillDepotExcelConfigDataEntry> =
+        serde_json::from_str(include_str!(
+            "../../data/AvatarSkillDepotExcelConfigData.json"
+        ))?;
+    let mut type_map = HashMap::new();
+    for config in avatar_skill_depot_excel_config_data {
+        type_map.insert(config.energySkill, SkillType::Burst);
+        type_map.insert(config.skills[0], SkillType::Auto);
+        type_map.insert(config.skills[1], SkillType::Skill);
+    }
+
+    Ok(type_map)
+}
+
 pub use gi::Artifact;
+pub use gi::Character;
+pub use gi::Inventory;
 pub use gi::Weapon;

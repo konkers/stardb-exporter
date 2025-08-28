@@ -6,10 +6,14 @@ use std::{
     sync::mpsc,
 };
 
-use auto_artifactarium::{matches_achievement_packet, matches_avatar_packet, matches_item_packet, GamePacket, GameSniffer};
+use auto_artifactarium::{
+    GamePacket, GameSniffer, matches_achievement_packet, matches_avatar_packet, matches_item_packet,
+};
 use base64::prelude::*;
 
 use regex::Regex;
+
+use crate::games::SkillType;
 
 pub fn sniff(
     achievement_ids: &[u32],
@@ -65,7 +69,7 @@ pub struct Artifact {
     mainStatKey: String,
     location: String,
     lock: bool,
-    substats: Vec<super::Substat>
+    substats: Vec<super::Substat>,
 }
 
 #[derive(serde::Serialize)]
@@ -76,15 +80,34 @@ pub struct Weapon {
     ascension: u32,
     refinement: u32,
     location: String,
-    lock: bool
+    lock: bool,
 }
 
 #[derive(serde::Serialize)]
 #[allow(non_snake_case)]
 pub struct Inventory {
+    pub characters: Vec<Character>,
     pub artifacts: Vec<Artifact>,
     pub weapon: Vec<Weapon>,
-    pub materials: HashMap<String, u32>
+    pub materials: HashMap<String, u32>,
+}
+
+#[derive(serde::Serialize)]
+#[allow(non_snake_case)]
+pub struct CharacterTalent {
+    pub auto: u32,
+    pub skill: u32,
+    pub burst: u32,
+}
+
+#[derive(serde::Serialize)]
+#[allow(non_snake_case)]
+pub struct Character {
+    pub key: String,
+    pub level: u32,
+    pub constellation: u32,
+    pub ascension: u32,
+    pub talent: CharacterTalent,
 }
 
 pub fn sniff_inventory(
@@ -94,14 +117,20 @@ pub fn sniff_inventory(
     weapon_id_map: &HashMap<u32, super::WeaponData>,
     material_id_map: &HashMap<u32, String>,
     character_id_map: &HashMap<u32, String>,
+    skill_type_map: &HashMap<u32, SkillType>,
     device_rx: &mpsc::Receiver<Vec<u8>>,
     no_artifact_filter: bool,
-    without_character: bool
+    without_character: bool,
 ) -> anyhow::Result<Inventory> {
     let keys = load_keys()?;
     let mut sniffer = GameSniffer::new().set_initial_keys(keys);
 
-    let mut inventory = Inventory{ artifacts: Vec::new(), weapon: Vec::new(), materials: HashMap::new() };
+    let mut inventory = Inventory {
+        characters: Vec::new(),
+        artifacts: Vec::new(),
+        weapon: Vec::new(),
+        materials: HashMap::new(),
+    };
     let mut items = Vec::new();
     let mut item_guid_character_name_map = HashMap::<u64, &String>::new();
 
@@ -113,20 +142,68 @@ pub fn sniff_inventory(
         };
 
         for command in commands {
-            if let Some(mut read_items) = matches_item_packet(&command) && !read_items.is_empty() {
+            if let Some(mut read_items) = matches_item_packet(&command)
+                && !read_items.is_empty()
+            {
                 tracing::info!("Found item packet");
                 items.append(&mut read_items);
             };
 
-            if !without_character && let Some(read_avatars) = matches_avatar_packet(&command) && !read_avatars.is_empty() {
+            if !without_character
+                && let Some(read_avatars) = matches_avatar_packet(&command)
+                && !read_avatars.is_empty()
+            {
                 tracing::info!("Found avatar packet");
 
-                for avatar in read_avatars {
-                    if let Some(name) = character_id_map.get(&avatar.avatar_id) {
-                        for guid in avatar.equip_guid_list {
-                            item_guid_character_name_map.insert(guid, name);
+                for avatar in &read_avatars {
+                    if avatar.avatar_type != 1 {
+                        continue;
+                    }
+
+                    let Some(name) = character_id_map.get(&avatar.avatar_id) else {
+                        continue;
+                    };
+
+                    for guid in &avatar.equip_guid_list {
+                        item_guid_character_name_map.insert(*guid, name);
+                    }
+
+                    let Some(level) = avatar.prop_map.get(&4001).map(|prop| prop.val as u32) else {
+                        continue;
+                    };
+
+                    let Some(ascension) = avatar.prop_map.get(&1002).map(|prop| prop.val as u32)
+                    else {
+                        continue;
+                    };
+
+                    let constellation = avatar.talent_id_list.len() as u32;
+
+                    tracing::info!("char {name}: {avatar:#?}");
+
+                    let mut auto = 1;
+                    let mut skill = 1;
+                    let mut burst = 1;
+
+                    for (id, level) in &avatar.skill_level_map {
+                        let Some(ty) = skill_type_map.get(id) else {
+                            continue;
+                        };
+                        match ty {
+                            SkillType::Auto => auto = *level,
+                            SkillType::Skill => skill = *level,
+                            SkillType::Burst => burst = *level,
                         }
                     }
+
+                    let character = Character {
+                        key: name.clone(),
+                        level,
+                        constellation,
+                        ascension,
+                        talent: CharacterTalent { auto, skill, burst },
+                    };
+                    inventory.characters.push(character);
                 }
             };
 
@@ -137,11 +214,19 @@ pub fn sniff_inventory(
             for item in &items {
                 if item.has_equip() {
                     let equip = item.equip();
-                    let location = item_guid_character_name_map.get(&item.guid).map(|s| (*s).clone()).unwrap_or_default();
+                    let location = item_guid_character_name_map
+                        .get(&item.guid)
+                        .map(|s| (*s).clone())
+                        .unwrap_or_default();
 
-                    if equip.has_reliquary() && let Some(artifact_type) = artifact_id_map.get(&item.item_id) {
+                    if equip.has_reliquary()
+                        && let Some(artifact_type) = artifact_id_map.get(&item.item_id)
+                    {
                         let artifact = equip.reliquary();
-                        if !no_artifact_filter && (artifact.level < 2 || artifact_type.rarity < 3) && location.is_empty() {
+                        if !no_artifact_filter
+                            && (artifact.level < 2 || artifact_type.rarity < 3)
+                            && location.is_empty()
+                        {
                             continue;
                         }
 
@@ -165,55 +250,63 @@ pub fn sniff_inventory(
 
                         for substat in substats.iter_mut() {
                             if substat.key.ends_with("_") {
-                                substat.value = ((substat.value * 100.0).round() / 10.0).round() / 10.0;
-                            }
-                            else {
+                                substat.value =
+                                    ((substat.value * 100.0).round() / 10.0).round() / 10.0;
+                            } else {
                                 substat.value = substat.value.round();
                             }
                         }
 
-                        inventory.artifacts.push(
-                            Artifact{
-                                setKey: artifact_type.setKey.clone(),
-                                slotKey: artifact_type.slotKey.clone(),
-                                level: artifact.level - 1,
-                                rarity: artifact_type.rarity,
-                                mainStatKey: main_prop_map.get(&artifact.main_prop_id).cloned().unwrap_or( "null".to_string()),
-                                location: location,
-                                lock: equip.is_locked,
-                                substats: substats
-                            }
-                        );
+                        inventory.artifacts.push(Artifact {
+                            setKey: artifact_type.setKey.clone(),
+                            slotKey: artifact_type.slotKey.clone(),
+                            level: artifact.level - 1,
+                            rarity: artifact_type.rarity,
+                            mainStatKey: main_prop_map
+                                .get(&artifact.main_prop_id)
+                                .cloned()
+                                .unwrap_or("null".to_string()),
+                            location: location,
+                            lock: equip.is_locked,
+                            substats: substats,
+                        });
 
                         found = true;
-                    }
-                    else if equip.has_weapon() && let Some(weapon_data) = weapon_id_map.get(&item.item_id){
+                    } else if equip.has_weapon()
+                        && let Some(weapon_data) = weapon_id_map.get(&item.item_id)
+                    {
                         let weapon = equip.weapon();
                         let refinement = match weapon.affix_map.values().next() {
                             Some(&x) => 1 + x,
                             None => 1,
                         };
 
-                        if weapon_data.rarity < 4 && weapon.level == 1 && refinement == 1 && !equip.is_locked && location.is_empty() {
+                        if weapon_data.rarity < 4
+                            && weapon.level == 1
+                            && refinement == 1
+                            && !equip.is_locked
+                            && location.is_empty()
+                        {
                             continue;
                         }
 
-                        inventory.weapon.push(
-                            Weapon{
-                                key: weapon_data.name.clone(),
-                                level: weapon.level,
-                                ascension: weapon.promote_level,
-                                refinement: refinement,
-                                location: location,
-                                lock: equip.is_locked,
-                            }
-                        );
+                        inventory.weapon.push(Weapon {
+                            key: weapon_data.name.clone(),
+                            level: weapon.level,
+                            ascension: weapon.promote_level,
+                            refinement: refinement,
+                            location: location,
+                            lock: equip.is_locked,
+                        });
 
                         found = true;
                     }
                 }
 
-                if item.has_material() && let material = item.material() && let Some(name) = material_id_map.get(&item.item_id) {
+                if item.has_material()
+                    && let material = item.material()
+                    && let Some(name) = material_id_map.get(&item.item_id)
+                {
                     inventory.materials.insert(name.clone(), material.count);
 
                     found = true;
